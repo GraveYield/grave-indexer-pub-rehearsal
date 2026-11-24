@@ -81,7 +81,7 @@ import {
   type StablePointerV1,
 } from "./snapshotPublication.js";
 
-// ─────────────────────────────────────────────────────────────── Error taxonomy ──
+// ─── Error taxonomy ────────────────────────────────────────────────────────
 
 /** Every distinct failure mode of the GitHub release API interaction. */
 export type ReleaseOpsErrorCategory =
@@ -120,7 +120,7 @@ export class ReleaseOpsError extends Error {
 /** Test exhaustiveness pin: every category must stay constructible and listed. */
 export const RELEASE_OPS_ERROR_CATEGORIES = RELEASE_OPS_CATEGORIES;
 
-// ────────────────────────────────────────────── Injectable HTTP plumbing ──
+// ─── Injectable HTTP plumbing ──────────────────────────────────────────────
 
 /**
  * Minimal HTTP response surface (compatible with the global `Response`).
@@ -173,7 +173,7 @@ async function fetchAssetWithHeaders(url: string, headers: Record<string, string
 /** Default unauthenticated asset downloader (redirect-following, 200-only). */
 export const defaultFetchAsset: FetchAssetImpl = (url) => fetchAssetWithHeaders(url, {});
 
-// ─────────────────────────── 1. Rollback-pointer discovery (review Task 4) ──
+// ─── 1. Rollback-pointer discovery (review Task 4) ─────────────────────────
 
 /**
  * The outcome of looking at the repository-wide latest-release pointer.
@@ -247,7 +247,7 @@ export async function resolveLatestRelease(args: {
   throw new ReleaseOpsError("UNEXPECTED_STATUS", `latest-release query returned an unexpected HTTP status`, res.status);
 }
 
-// ───────────────────────────── 2. Same-release asset verification (review Task 5) ──
+// ─── 2. Same-release asset verification (review Task 5) ────────────────────
 
 /** Which URL family the three assets are fetched through. */
 export type AssetScope = "versioned" | "latest";
@@ -579,7 +579,7 @@ export async function verifyReleaseAssetSet(args: {
   });
 }
 
-// ─── 3. Dedicated stable reference — resolve, verify, build (sixth round) ──────
+// ─── 3. Dedicated stable reference — resolve, verify, build (sixth round) ──
 //
 // The owner-selected stable reference is the git ref
 // `refs/tags/console-snapshot-prod`: an ANNOTATED tag whose tag-object
