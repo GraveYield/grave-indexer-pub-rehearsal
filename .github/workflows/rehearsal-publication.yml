@@ -138,6 +138,13 @@ jobs:
           version: 9
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build:sdk
+      - name: Build the ZERO-DEPENDENCY release-ops bundle (BEFORE any local draft verification)
+        # PARITY (production sixteenth-round P1): the local draft-byte
+        # verification runs the prebuilt dist/release-ops.mjs bundle
+        # (src/releaseOpsCli.ts — node: builtins only, pinned by
+        # test/releaseOpsCliBundle.test.ts), built here from the asserted
+        # commit BEFORE the verification step runs.
+        run: pnpm run bundle:release-ops
       - name: Record the run identity (for the rehearsal report)
         run: |
           {
@@ -328,7 +335,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ── Scenario: happy path — the FULL pointer architecture + rollback drill ─
-      - name: Publish the immutable versioned release (DRAFT-FIRST sequence, created explicitly NOT latest)
+      - name: Create the versioned release DRAFT, upload all three assets, and retrieve the exact draft bytes (DRAFT-FIRST sequence, created explicitly NOT latest)
         # TWELFTH ROUND: the rehearsal rehearses the DRAFT-FIRST sequence
         # that docs/SNAPSHOT_PUBLICATION.md §8.3 requires the production
         # publisher to adopt BEFORE GitHub-enforced immutable releases are
@@ -339,6 +346,19 @@ jobs:
         # endpoint serves published releases only. Proving this sequence
         # live here is the pre-enablement evidence §8.3 demands; the
         # production patch that adopts it is prepared separately.
+        #
+        # SIXTEENTH-ROUND PARITY (credential boundary): this step is the
+        # draft download and retrieval process ONLY — the publication
+        # moved into its own step BELOW, and it runs ONLY after the
+        # separate credential-free verification step has passed. The
+        # job-level rehearsal token (the same write-capable github.token
+        # as before this split) covers the draft create/upload/retrieve
+        # operations here exactly as it did before; the verification
+        # step below runs with GH_TOKEN and GITHUB_TOKEN explicitly
+        # CLEARED, so repository-built code never coexists with a
+        # write-capable credential (the same boundary production
+        # enforces between its retrieval step and its FULL draft
+        # verification step).
         if: env.SCENARIO == 'happy' || env.SCENARIO == 'post-activation-failure'
         run: |
           TAG=$(node -e "console.log(JSON.parse(require('fs').readFileSync('data/console-snapshot-provenance.json','utf8')).versionedTag)")
@@ -383,6 +403,37 @@ jobs:
           ( cd dl && sha256sum -c console-snapshot.sha256 )
           jq -e --arg tag "$TAG" '.versionedTag == $tag' dl/console-snapshot-provenance.json > /dev/null \
             || { echo "the staged provenance does not name the release tag $TAG"; exit 1; }
+          echo "the exact draft bytes are retrieved to dl/ (release id $DRAFT_RELEASE_ID, tag $TAG) — publication waits for the credential-free verification below"
+      - name: Verify exact downloaded draft bytes (credential-free)
+        # PARITY (production sixteenth-round P1): the FULL release-ops
+        # verification (verifyArtifactTriple — checksum + provenance
+        # digest + tag cross-check + schema-v2 completeness) runs over
+        # the EXACT downloaded draft bytes BEFORE publication.
+        # CREDENTIAL BOUNDARY: this step explicitly CLEARS GH_TOKEN and
+        # GITHUB_TOKEN, so the job-level write-capable rehearsal token
+        # is NOT available to this process — the verification command
+        # (repository-built code, the prebuilt zero-dependency bundle)
+        # never coexists with a write-capable credential, and it
+        # performs zero network I/O (pure local verification). If ANY
+        # check fails, the run aborts BEFORE the publish: the release
+        # REMAINS an un-published draft (no immutable residue, no tag
+        # materialized), the dedicated stable reference is untouched,
+        # and the previous artifact keeps serving.
+        if: env.SCENARIO == 'happy' || env.SCENARIO == 'post-activation-failure'
+        env:
+          TAG: ${{ env.TAG }}
+          GH_TOKEN: ""
+          GITHUB_TOKEN: ""
+        run: node dist/release-ops.mjs verify-local-release-assets --dir dl --expected-tag "$TAG"
+      - name: Publish the VERIFIED draft (draft=false + make_latest=false, then read-back)
+        # Runs ONLY after the credential-free verification passed: the
+        # publish materializes the versioned tag at $CHECKOUT_SHA; a
+        # racing duplicate tag fails closed here (422), before
+        # activation. The same bounded publish read-back retry the
+        # former single step used is preserved unchanged (the by-ID
+        # read may lag the PATCH — same consistency window class).
+        if: env.SCENARIO == 'happy' || env.SCENARIO == 'post-activation-failure'
+        run: |
           gh api --method PATCH "repos/$REPO/releases/$DRAFT_RELEASE_ID" -F draft=false -f make_latest=false > /dev/null
           # Publish read-back with the SAME bounded retry (the by-ID read
           # may also lag the PATCH — same consistency window class).
