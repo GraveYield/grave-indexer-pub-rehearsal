@@ -81,7 +81,7 @@ import {
   type StablePointerV1,
 } from "./snapshotPublication.js";
 
-// ─── Error taxonomy ────────────────────────────────────────────────────────
+// ─── Error taxonomy ────────────────────────────────────────────────────────────
 
 /** Every distinct failure mode of the GitHub release API interaction. */
 export type ReleaseOpsErrorCategory =
@@ -120,7 +120,7 @@ export class ReleaseOpsError extends Error {
 /** Test exhaustiveness pin: every category must stay constructible and listed. */
 export const RELEASE_OPS_ERROR_CATEGORIES = RELEASE_OPS_CATEGORIES;
 
-// ─── Injectable HTTP plumbing ──────────────────────────────────────────────
+// ─── Injectable HTTP plumbing ──────────────────────────────────────────────────
 
 /**
  * Minimal HTTP response surface (compatible with the global `Response`).
@@ -173,7 +173,7 @@ async function fetchAssetWithHeaders(url: string, headers: Record<string, string
 /** Default unauthenticated asset downloader (redirect-following, 200-only). */
 export const defaultFetchAsset: FetchAssetImpl = (url) => fetchAssetWithHeaders(url, {});
 
-// ─── 1. Rollback-pointer discovery (review Task 4) ─────────────────────────
+// ─── 1. Rollback-pointer discovery (review Task 4) ─────────────────────────────
 
 /**
  * The outcome of looking at the repository-wide latest-release pointer.
@@ -247,7 +247,7 @@ export async function resolveLatestRelease(args: {
   throw new ReleaseOpsError("UNEXPECTED_STATUS", `latest-release query returned an unexpected HTTP status`, res.status);
 }
 
-// ─── 2. Same-release asset verification (review Task 5) ────────────────────
+// ─── 2. Same-release asset verification (review Task 5) ────────────────────────
 
 /** Which URL family the three assets are fetched through. */
 export type AssetScope = "versioned" | "latest";
@@ -412,6 +412,82 @@ function verifyFetchedArtifactCompleteness(
 }
 
 /**
+ * The SHARED post-fetch verification core (sixteenth round — P1
+ * correction): the EXACT sequence of checks `verifyReleaseAssetSet` has
+ * always applied after fetching the snapshot / provenance / checksum
+ * triple, factored out so a SEPARATE transport can run the SAME full
+ * verification over bytes that were fetched by a different (credential-
+ * carrying) step.
+ *
+ * This is NOT a parallel validator — it IS the release-ops verification
+ * core, applied to in-memory bytes:
+ *   1. the checksum file must be sha256sum-compatible, must name the
+ *      snapshot asset, and must match the EXACT snapshot bytes;
+ *   2. the provenance sidecar must parse, must NAME `expectedTag`, and
+ *      must verify over the exact snapshot bytes (SHA-256 + byte length);
+ *   3. the producer's completeness contract is enforced over the parsed
+ *      snapshot bytes (independent completeness gate — eighth round):
+ *      no completeness failure markers, well-formed count evidence,
+ *      exact count agreement, non-empty publication.
+ * Empty artifacts are rejected explicitly with actionable errors before
+ * the checksum parse (a zero-byte file can never be a valid artifact).
+ *
+ * Transport-neutral: NO network, NO credential — the caller supplies the
+ * three byte arrays from wherever they were fetched. `verifyReleaseAssetSet`
+ * calls it after its own fetch; the workflow's draft-verification step
+ * calls it (through `verify-local-release-assets`) over the bytes
+ * downloaded from the DRAFT release by a separately-authorized retrieval
+ * step, so the full verification runs BEFORE publication without the
+ * release-write credential ever reaching repository-built code.
+ */
+export function verifyArtifactTriple(args: {
+  snapshotBytes: Uint8Array;
+  provenanceBytes: Uint8Array;
+  checksumBytes: Uint8Array;
+  expectedTag: string;
+}): void {
+  const { snapshotBytes, provenanceBytes, checksumBytes } = args;
+  if (snapshotBytes.byteLength === 0) {
+    throw new ReleaseOpsError("MALFORMED_RESPONSE", `the '${SNAPSHOT_ASSET_NAME}' artifact is EMPTY (0 bytes) — refusing verification`);
+  }
+  if (provenanceBytes.byteLength === 0) {
+    throw new ReleaseOpsError("MALFORMED_RESPONSE", `the '${PROVENANCE_ASSET_NAME}' artifact is EMPTY (0 bytes) — refusing verification`);
+  }
+  if (checksumBytes.byteLength === 0) {
+    throw new ReleaseOpsError("MALFORMED_RESPONSE", `the '${CHECKSUM_ASSET_NAME}' artifact is EMPTY (0 bytes) — refusing verification`);
+  }
+  // Checksum file must be sha256sum-compatible, must name the snapshot
+  // asset, and must match the EXACT snapshot bytes we received.
+  verifyChecksumFile(snapshotBytes, checksumBytes, SNAPSHOT_ASSET_NAME);
+
+  // Provenance must parse, must verify over the exact snapshot bytes
+  // (SHA-256 + byte length), and must NAME the expected versioned tag.
+  let provenance: PublicationProvenance;
+  try {
+    provenance = JSON.parse(Buffer.from(provenanceBytes).toString("utf8")) as PublicationProvenance;
+  } catch (err) {
+    throw new ReleaseOpsError("MALFORMED_RESPONSE", `provenance sidecar is not JSON: ${String((err as Error).message ?? err)}`);
+  }
+  if (provenance.versionedTag !== args.expectedTag) {
+    throw new ReleaseOpsError(
+      "MALFORMED_RESPONSE",
+      `provenance names release ${provenance.versionedTag ?? "<none>"}, expected ${args.expectedTag} — the fetched files are a MIXED artifact set`,
+    );
+  }
+  try {
+    verifySnapshotIntegrity(snapshotBytes, provenance);
+  } catch (err) {
+    if (err instanceof SnapshotPublicationError) {
+      throw new ReleaseOpsError("MALFORMED_RESPONSE", `integrity verification failed: ${err.message}`);
+    }
+    throw err;
+  }
+  // Eighth round (Finding 3): the same-release verification gate ALSO
+  // enforces the producer's completeness contract over the fetched bytes.
+  verifyFetchedArtifactCompleteness(snapshotBytes, provenance);
+}
+
+/**
  * Verify that the snapshot / provenance / checksum triple fetched through
  * `scope` URLs is ONE release's complete, internally consistent artifact
  * set naming `expectedTag`.
@@ -491,38 +567,19 @@ export async function verifyReleaseAssetSet(args: {
     checksumBytes = await fetchAsset(urls.checksum);
   }
 
-  // Checksum file must be sha256sum-compatible, must name the snapshot
-  // asset, and must match the EXACT snapshot bytes we received.
-  verifyChecksumFile(snapshotBytes, checksumBytes, SNAPSHOT_ASSET_NAME);
-
-  // Provenance must parse, must verify over the exact snapshot bytes
-  // (SHA-256 + byte length), and must NAME the expected versioned tag.
-  let provenance: PublicationProvenance;
-  try {
-    provenance = JSON.parse(Buffer.from(provenanceBytes).toString("utf8")) as PublicationProvenance;
-  } catch (err) {
-    throw new ReleaseOpsError("MALFORMED_RESPONSE", `provenance sidecar is not JSON: ${String((err as Error).message ?? err)}`);
-  }
-  if (provenance.versionedTag !== args.expectedTag) {
-    throw new ReleaseOpsError(
-      "MALFORMED_RESPONSE",
-      `provenance names release ${provenance.versionedTag ?? "<none>"}, expected ${args.expectedTag} — the fetched files are a MIXED artifact set`,
-    );
-  }
-  try {
-    verifySnapshotIntegrity(snapshotBytes, provenance);
-  } catch (err) {
-    if (err instanceof SnapshotPublicationError) {
-      throw new ReleaseOpsError("MALFORMED_RESPONSE", `integrity verification failed: ${err.message}`);
-    }
-    throw err;
-  }
-  // Eighth round (Finding 3): the same-release verification gate ALSO
-  // enforces the producer's completeness contract over the fetched bytes.
-  verifyFetchedArtifactCompleteness(snapshotBytes, provenance);
+  // The post-fetch verification core is SHARED with the draft-byte
+  // verification (`verifyArtifactTriple` — sixteenth round): the fetched
+  // triple undergoes the EXACT same checks the workflow's draft gate
+  // applies to the separately downloaded draft bytes.
+  verifyArtifactTriple({
+    snapshotBytes,
+    provenanceBytes,
+    checksumBytes,
+    expectedTag: args.expectedTag,
+  });
 }
 
-// ─── 3. Dedicated stable reference — resolve, verify, build (sixth round) ──
+// ─── 3. Dedicated stable reference — resolve, verify, build (sixth round) ──────
 //
 // The owner-selected stable reference is the git ref
 // `refs/tags/console-snapshot-prod`: an ANNOTATED tag whose tag-object
